@@ -166,7 +166,7 @@ HandleTurnActionSelectionState:
   D: 8013fc4
   F: 8013fb0
   I: 8013fc5
-  J:
+  J: 8013860
   S: 8013fb0
 HandleInputChooseAction:
   D:
@@ -183,6 +183,7 @@ HandleInputChooseAction:
     - 802e3bc
     - 80dd7c8
   J:
+    - 802dc14
   S:
     - 80f0a14
     - 8034048
@@ -254,6 +255,10 @@ BattleScript_ForgotAndLearnedNewMove:
   I: 81d5eb2
   J:
   S: 81d857a
+gBattleOutcome:
+  J: 2022aac
+gActionSelectionCursor:
+  J: 2023f58
 gEnemyParty:
   J: 2023f8c
 gBattlescriptCurrInstr:
