@@ -182,8 +182,7 @@ HandleInputChooseAction:
   I:
     - 0x802e3bc
     - 0x80dd7c8
-  J: ~
-    - 0x802dc14
+  J: 0x802dc14
   S:
     - 0x80f0a14
     - 0x8034048
@@ -193,7 +192,7 @@ HandleInputChooseMove:
   D: 0x802e9a8
   F: 0x802e980
   I: 0x802e994
-  J: ~
+  J: 0x802e1ec
   S: 0x802e994
 Task_DuckBGMForPokemonCry:
   D: 0x8072198
@@ -255,6 +254,8 @@ BattleScript_ForgotAndLearnedNewMove:
   I: 0x81d5eb2
   J: ~
   S: 0x81d857a
+gMoveSelectionCursor:
+  J: 0x2023f5c
 gBattleOutcome:
   J: 0x2022aac
 gActionSelectionCursor:
@@ -472,6 +473,8 @@ Task_FieldItemContextMenuHandleInput:
   S: 0x8109d68
 gBagMenuState:
   J: 0x203ac74
+gPaletteFade:
+  J: 0x20379ec
 #---------------#
 
 #----------------#

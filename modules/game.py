@@ -44,6 +44,9 @@ def _load_symbols(symbols_file: str, language: ROMLanguage) -> None:
                 if language_code in addr_mapping:
                     addresses_list = addr_mapping[language_code]
 
+                    if not addresses_list:
+                        continue
+
                     if isinstance(addresses_list, int):
                         addresses_list = [addresses_list]
 
@@ -51,7 +54,7 @@ def _load_symbols(symbols_file: str, language: ROMLanguage) -> None:
                         _reverse_symbols.pop(_symbols[label.upper()][0], None)
 
                     for addr in addresses_list:
-                        if addr:
+                        if addr is not None:
                             _symbols[label.upper()] = (addr, _symbols[label.upper()][1])
                             _reverse_symbols[addr] = (
                                 label.upper(),
