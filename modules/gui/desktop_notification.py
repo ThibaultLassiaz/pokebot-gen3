@@ -7,6 +7,7 @@ from modules.console import console
 from modules.context import context
 from modules.sprites import choose_random_sprite
 from modules.version import pokebot_name, pokebot_version
+from pathlib import Path
 
 
 def desktop_notification(title: str, message: str, icon: Path = None) -> None:
@@ -19,9 +20,12 @@ def desktop_notification(title: str, message: str, icon: Path = None) -> None:
         notification = Notify(
             default_notification_application_name=f"{context.profile.path.name} | {pokebot_name} {pokebot_version}"
         )
+        path = Path(__file__).parent / "audio" / "discord.wav"
+        windows_path = path.as_posix()
         notification.title = title
         notification.message = message
         notification.icon = icon
+        notification.audio = windows_path
 
         notification.send()
     except UnsupportedPlatform:
