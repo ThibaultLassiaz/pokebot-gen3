@@ -29,6 +29,7 @@ def get_bot_modes() -> list[Type[BotMode]]:
         from .puzzle_solver import PuzzleSolverMode
         from .roamer_reset import RoamerResetMode
         from .rock_smash import RockSmashMode
+        from .seedfinder_mode import SeedFinderMode
         from .safari import SafariMode
         from .spin import SpinMode
         from .starters import StartersMode
@@ -61,6 +62,7 @@ def get_bot_modes() -> list[Type[BotMode]]:
             StaticSoftResetsMode,
             SweetScentMode,
             SudowoodoMode,
+            SeedFinderMode,
         ]
 
         for mode in plugin_get_additional_bot_modes():
