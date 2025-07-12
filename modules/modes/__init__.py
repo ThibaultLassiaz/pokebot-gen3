@@ -30,6 +30,7 @@ def get_bot_modes() -> list[Type[BotMode]]:
         from .roamer_reset import RoamerResetMode
         from .rock_smash import RockSmashMode
         from .safari import SafariMode
+        from .cakes_safari import CakesSafariMode
         from .spin import SpinMode
         from .starters import StartersMode
         from .sudowoodo import SudowoodoMode
@@ -61,6 +62,7 @@ def get_bot_modes() -> list[Type[BotMode]]:
             StaticSoftResetsMode,
             SweetScentMode,
             SudowoodoMode,
+            CakesSafariMode,
         ]
 
         for mode in plugin_get_additional_bot_modes():
