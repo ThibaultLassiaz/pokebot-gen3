@@ -1,12 +1,15 @@
+import random
 from typing import Generator, Tuple
 
 from modules.context import context
 from modules.battle_state import BattleOutcome
 from modules.map_data import MapFRLG, MapRSE, is_safari_map
+from modules.map_path import calculate_path
+from modules.items import get_item_bag, get_item_by_name
 from modules.region_map import FlyDestinationRSE
 from modules.player import get_player, get_player_avatar, TileTransitionState
 from modules.pokemon_party import get_party
-from modules.memory import get_event_flag
+from modules.memory import get_event_flag, read_symbol, unpack_uint16
 from modules.menuing import StartMenuNavigator
 from modules.modes.util.walking import wait_for_player_avatar_to_be_controllable
 from modules.modes.util.higher_level_actions import unmount_bicycle
@@ -45,6 +48,7 @@ from .util import (
     apply_white_flute_if_available,
     save_the_game,
 )
+from modules.tasks import is_waiting_for_input
 from modules.modes.util.tasks_scripts import (
     wait_for_task_to_start_and_finish,
     wait_for_yes_no_question,
@@ -59,7 +63,13 @@ class CakesSafariMode(BotMode):
         self._pokemon_caught = None
         self._should_reenter = False
         self._should_reset = False
+        self._should_save = False
         self._use_repel = False
+        self._current_map = None
+        self._current_tile = None
+        self._do_easter_egg_after_battle = False  # NEW: flag to trigger easter egg after battle
+        self._current_map = None  # track current map for easter egg
+        self._current_tile = None
         # You can adjust the number of runs below. Keep in mind you can only carry 30 Pokéblocks,
         # so spending around $15,000 is typically the upper limit per run.
         # After about 30 runs, you'll likely have used up all your Pokéblocks.
@@ -67,6 +77,7 @@ class CakesSafariMode(BotMode):
         # stop, and prompt you to save your game.
         # Here I've seen 300k for almost unlimited runs
         self._money_spent_limit = 300000
+        self._easter_egg_probability = 1000
 
     @staticmethod
     def name() -> str:
@@ -87,8 +98,41 @@ class CakesSafariMode(BotMode):
         Handle the outcome of a battle. If the battle resulted in a catch,
         update flags to manage the re-entry or reset logic.
         """
+        if outcome is BattleOutcome.RanAway:
+            steps_remaining_symbol = "sSafariZoneStepCounter"
+            steps_remaining = unpack_uint16(read_symbol(steps_remaining_symbol))
+
+            location = (self._current_map, self._current_tile)
+            destination = (MapRSE.SAFARI_ZONE_SOUTHWEST, (32, 8))
+
+            path_to_rest_house = calculate_path(
+                location,
+                destination,
+                avoid_encounters=True,
+                avoid_scripted_events=True,
+                has_acro_bike=get_item_bag().quantity_of(get_item_by_name("Acro Bike")) > 0,
+                has_mach_bike=get_item_bag().quantity_of(get_item_by_name("Mach Bike")) > 0,
+            )
+
+            path_from_rest_house = calculate_path(
+                destination,
+                location,
+                avoid_encounters=True,
+                avoid_scripted_events=True,
+                has_acro_bike=get_item_bag().quantity_of(get_item_by_name("Acro Bike")) > 0,
+                has_mach_bike=get_item_bag().quantity_of(get_item_by_name("Mach Bike")) > 0,
+            )
+
+            path_length = len(path_to_rest_house) + len(path_from_rest_house) + 10
+
+            if path_length < steps_remaining:
+                rand = random.randint(1, self._easter_egg_probability)
+                if rand == 1:
+                    self._do_easter_egg_after_battle = True
+
         if outcome is BattleOutcome.Caught:
             self._should_reenter = True
+            self._should_save = True
             self._atleast_one_pokemon_catched = True
             assert_boxes_or_party_can_fit_pokemon()
         if get_safari_balls_left() < 30:
@@ -205,7 +249,10 @@ class CakesSafariMode(BotMode):
         """Handles re-entry into the Safari Zone."""
         if is_safari_map():
             yield from self._exit_safari_zone()
+        if self._should_save:
+            yield from save_the_game()
         self._should_reenter = False
+        self._should_save = False
         return
 
     def _exit_safari_zone(self) -> Generator:
@@ -234,14 +281,20 @@ class CakesSafariMode(BotMode):
         path = get_navigation_path(target_map, tile_location)
 
         for map_group, coords in path:
+            self._current_map = map_group
+            self._current_tile = coords
             yield from navigate_to(map_group, coords)
-
         if mode in (SafariHuntingMode.SPIN, SafariHuntingMode.SURF):
             if self._use_repel and not repel_is_active():
                 yield from apply_repel()
             yield from unmount_bicycle()
             yield from apply_white_flute_if_available()
-            yield from spin(stop_condition=stop_condition)
+            yield from spin(
+                stop_condition=stop_condition,
+                easter_egg_flag=lambda: self._do_easter_egg_after_battle,
+                easter_egg_action=lambda: self._easter_egg_rest(self._current_map, self._current_tile),
+                easter_egg_flag_setter=lambda val: setattr(self, "_do_easter_egg_after_battle", val),
+            )
         elif mode == SafariHuntingMode.FISHING:
             yield from fish(stop_condition=stop_condition, loop=True)
         else:
@@ -304,6 +357,37 @@ class CakesSafariMode(BotMode):
         yield from navigate_to(MapRSE.ROUTE121, (37, 5))
         yield from navigate_to(MapRSE.ROUTE121_SAFARI_ZONE_ENTRANCE, (9, 4))
         yield from save_the_game()
+
+    def _easter_egg_rest(self, return_map_group, return_coords) -> Generator:
+        yield from navigate_to(MapRSE.SAFARI_ZONE_SOUTHWEST, (32, 8))
+        yield from ensure_facing_direction("Up")
+        context.emulator.press_button("A")
+        for _ in range(240):
+            yield
+        context.emulator.press_button("A")
+        for _ in range(120):
+            yield
+        yield from ensure_facing_direction("Down")
+        for _ in range(120):
+            yield
+        yield from ensure_facing_direction("Right")
+        for _ in range(120):
+            yield
+        yield from ensure_facing_direction("Left")
+        for _ in range(120):
+            yield
+        yield from ensure_facing_direction("Down")
+        for _ in range(240):
+            yield
+        yield from navigate_to(MapRSE.SAFARI_ZONE_SOUTHWEST, (29, 7))
+        yield from navigate_to(MapRSE.SAFARI_ZONE_REST_HOUSE, (2, 6))
+        yield from ensure_facing_direction("Right")
+        for _ in range(600):
+            yield
+        yield from navigate_to(MapRSE.SAFARI_ZONE_REST_HOUSE, (3, 8))
+        yield from navigate_to(return_map_group, return_coords)
+        yield from unmount_bicycle()
+        yield from apply_white_flute_if_available()
 
     def _get_next_target(self, stats: dict) -> str | None:
         pokemon_stats = stats.get("pokemon", {})

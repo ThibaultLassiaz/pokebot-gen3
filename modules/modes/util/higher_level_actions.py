@@ -151,7 +151,13 @@ def fish(stop_condition: Callable[[], bool] | None = None, loop: bool = False) -
 
 
 @debug.track
-def spin(stop_condition: Callable[[], bool] | None = None, counter_clockwise: bool = False):
+def spin(
+    stop_condition: Callable[[], bool] | None = None,
+    easter_egg_flag: Callable[[], bool] | None = None,
+    easter_egg_action: Callable[[], Generator] | None = None,
+    easter_egg_flag_setter: Callable[[bool], None] | None = None,  # NEW
+    counter_clockwise: bool = False,
+):
     directions = ["Up", "Left", "Down", "Right"] if counter_clockwise else ["Up", "Right", "Down", "Left"]
     while True:
         avatar = get_player_avatar()
@@ -162,6 +168,14 @@ def spin(stop_condition: Callable[[], bool] | None = None, counter_clockwise: bo
         ):
             if stop_condition is not None and stop_condition():
                 return
+
+            if easter_egg_flag is not None and easter_egg_flag():
+                if easter_egg_action is not None:
+                    yield from easter_egg_action()
+                # Reset the flag here:
+                if easter_egg_flag_setter is not None:
+                    easter_egg_flag_setter(False)
+                continue
 
             direction_index = (directions.index(avatar.facing_direction) + 1) % len(directions)
             context.emulator.press_button(directions[direction_index])
