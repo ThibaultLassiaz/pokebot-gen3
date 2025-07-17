@@ -155,7 +155,7 @@ def spin(
     stop_condition: Callable[[], bool] | None = None,
     easter_egg_flag: Callable[[], bool] | None = None,
     easter_egg_action: Callable[[], Generator] | None = None,
-    easter_egg_flag_setter: Callable[[bool], None] | None = None,  # NEW
+    easter_egg_flag_setter: Callable[[bool], None] | None = None,
     counter_clockwise: bool = False,
 ):
     directions = ["Up", "Left", "Down", "Right"] if counter_clockwise else ["Up", "Right", "Down", "Left"]
@@ -172,7 +172,6 @@ def spin(
             if easter_egg_flag is not None and easter_egg_flag():
                 if easter_egg_action is not None:
                     yield from easter_egg_action()
-                # Reset the flag here:
                 if easter_egg_flag_setter is not None:
                     easter_egg_flag_setter(False)
                 continue

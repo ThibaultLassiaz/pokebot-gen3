@@ -1,5 +1,6 @@
 import random
 from typing import Generator, Tuple
+from datetime import datetime, timedelta
 
 from modules.context import context
 from modules.battle_state import BattleOutcome
@@ -12,15 +13,18 @@ from modules.pokemon_party import get_party
 from modules.memory import get_event_flag, read_symbol, unpack_uint16
 from modules.menuing import StartMenuNavigator
 from modules.modes.util.walking import wait_for_player_avatar_to_be_controllable
-from modules.modes.util.higher_level_actions import unmount_bicycle
+from modules.modes.util.higher_level_actions import unmount_bicycle, put_pokeblock_in_feeder
+from modules.pokeblock_feeder import get_active_pokeblock_feeder_for_location
 from modules.safari_strategy import (
     SafariPokemon,
     SafariHuntingMode,
     SafariHuntingObject,
+    RSESafariStrategy,
     get_safari_pokemon,
     get_navigation_path,
     get_safari_balls_left,
     get_safari_zone_config,
+    get_lowest_feel_pokeblock_by_type,
 )
 from modules.runtime import get_sprites_path
 from modules.gui.multi_select_window import Selection, ask_for_choice
@@ -60,24 +64,18 @@ class CakesSafariMode(BotMode):
     def __init__(self):
         self._safari_config = get_safari_zone_config(context.rom)
         self._starting_cash = None
-        self._pokemon_caught = None
         self._should_reenter = False
         self._should_reset = False
         self._should_save = False
         self._use_repel = False
         self._current_map = None
         self._current_tile = None
-        self._do_easter_egg_after_battle = False  # NEW: flag to trigger easter egg after battle
-        self._current_map = None  # track current map for easter egg
-        self._current_tile = None
-        # You can adjust the number of runs below. Keep in mind you can only carry 30 Pokéblocks,
-        # so spending around $15,000 is typically the upper limit per run.
-        # After about 30 runs, you'll likely have used up all your Pokéblocks.
-        # Once this spending limit is reached, the bot will exit the Safari Zone,
-        # stop, and prompt you to save your game.
-        # Here I've seen 300k for almost unlimited runs
+        self._feeder_direction = None
+        self._pokeblock_type_in_feeder = "spicy"
+        self._do_easter_egg_after_battle = False
         self._money_spent_limit = 300000
-        self._easter_egg_probability = 1000
+        self._easter_egg_timestamp = None
+        self._atleast_one_pokemon_catched = False
 
     @staticmethod
     def name() -> str:
@@ -94,47 +92,50 @@ class CakesSafariMode(BotMode):
         return True
 
     def on_battle_ended(self, outcome: "BattleOutcome") -> None:
-        """
-        Handle the outcome of a battle. If the battle resulted in a catch,
-        update flags to manage the re-entry or reset logic.
-        """
-        if outcome is BattleOutcome.RanAway:
-            steps_remaining_symbol = "sSafariZoneStepCounter"
-            steps_remaining = unpack_uint16(read_symbol(steps_remaining_symbol))
+        steps_remaining_symbol = "sSafariZoneStepCounter"
+        steps_remaining = unpack_uint16(read_symbol(steps_remaining_symbol))
 
-            location = (self._current_map, self._current_tile)
-            destination = (MapRSE.SAFARI_ZONE_SOUTHWEST, (32, 8))
+        location = (self._current_map, self._current_tile)
+        rest_house = (MapRSE.SAFARI_ZONE_SOUTHWEST, (32, 8))
 
-            path_to_rest_house = calculate_path(
-                location,
-                destination,
-                avoid_encounters=True,
-                avoid_scripted_events=True,
-                has_acro_bike=get_item_bag().quantity_of(get_item_by_name("Acro Bike")) > 0,
-                has_mach_bike=get_item_bag().quantity_of(get_item_by_name("Mach Bike")) > 0,
-            )
+        to_rest = calculate_path(
+            location,
+            rest_house,
+            avoid_encounters=True,
+            avoid_scripted_events=True,
+            has_acro_bike=self._has_bike("Acro Bike"),
+            has_mach_bike=self._has_bike("Mach Bike"),
+        )
+        from_rest = calculate_path(
+            rest_house,
+            location,
+            avoid_encounters=True,
+            avoid_scripted_events=True,
+            has_acro_bike=self._has_bike("Acro Bike"),
+            has_mach_bike=self._has_bike("Mach Bike"),
+        )
 
-            path_from_rest_house = calculate_path(
-                destination,
-                location,
-                avoid_encounters=True,
-                avoid_scripted_events=True,
-                has_acro_bike=get_item_bag().quantity_of(get_item_by_name("Acro Bike")) > 0,
-                has_mach_bike=get_item_bag().quantity_of(get_item_by_name("Mach Bike")) > 0,
-            )
+        if outcome == BattleOutcome.Lost:
+            if len(to_rest) + len(from_rest) + 10 < steps_remaining:
+                yield from self._easter_egg_rest(self._current_map, self._current_tile)
+            if get_safari_balls_left() < 30:
+                current_cash = get_player().money
+                if (self._starting_cash - current_cash > self._money_spent_limit) or (current_cash < 500):
+                    self._should_reset = True
+                else:
+                    self._should_reenter = True
 
-            path_length = len(path_to_rest_house) + len(path_from_rest_house) + 10
+        elif outcome == BattleOutcome.RanAway:
+            if self._easter_egg_timestamp and datetime.now() >= self._easter_egg_timestamp:
+                self._do_easter_egg_after_battle = True
+                self._easter_egg_timestamp = None
 
-            if path_length < steps_remaining:
-                rand = random.randint(1, self._easter_egg_probability)
-                if rand == 1:
-                    self._do_easter_egg_after_battle = True
-
-        if outcome is BattleOutcome.Caught:
+        elif outcome == BattleOutcome.Caught:
             self._should_reenter = True
             self._should_save = True
             self._atleast_one_pokemon_catched = True
             assert_boxes_or_party_can_fit_pokemon()
+
         if get_safari_balls_left() < 30:
             current_cash = get_player().money
             if (self._starting_cash - current_cash > self._money_spent_limit) or (current_cash < 500):
@@ -143,49 +144,25 @@ class CakesSafariMode(BotMode):
                 self._should_reenter = True
 
     def run(self) -> Generator:
-        stats = context.stats.get_global_stats().to_dict()
         self._starting_cash = get_player().money
 
         assert_save_game_exists("There is no saved game. Cannot start Safari mode. Please save your game.")
-
         assert_boxes_or_party_can_fit_pokemon()
         assert_boxes_or_party_can_fit_pokemon(check_in_saved_game=True)
-
-        assert_saved_on_map(
-            SavedMapLocation(self._safari_config["map"]),
-            self._safari_config["save_message"],
-        )
-
-        pokemon_choice = self._get_next_target(stats)
-
-        if pokemon_choice is None:
-            context.message = "All required Pokémon caught. Safari is complete."
-            context.set_manual_mode()
-            return
-
-        context.message = f"Current target: {pokemon_choice}"
-        target = get_safari_pokemon(pokemon_choice)
-
-        mode = ask_for_choice(
-            [
-                Selection("Use Repel", get_sprites_path() / "items" / "Repel.png"),
-                Selection("No Repel", get_sprites_path() / "other" / "No Repel.png"),
-            ],
-            window_title="Use Repel?",
-        )
-
-        if mode is None:
-            context.set_manual_mode()
-            yield
-            return
-
-        if mode == "Use Repel":
-            self._use_repel = True
-
-        self._check_mode_requirement(target.value.mode, target.value.hunting_object)
-        yield from self._check_map_requirement(target.value.map_location)
+        assert_saved_on_map(SavedMapLocation(self._safari_config["map"]), self._safari_config["save_message"])
 
         while True:
+            target_name = self._get_next_target(context.stats.get_global_stats().to_dict())
+            if not target_name:
+                context.message = "All required Pokémon caught. Safari is complete."
+                context.set_manual_mode()
+                break
+
+            context.message = f"Current target: {target_name}"
+            target = get_safari_pokemon(target_name)
+            self._check_mode_requirement(target.value.mode, target.value.hunting_object)
+            yield from self._check_map_requirement(target.value.map_location)
+
             if self._should_reset:
                 if not self._atleast_one_pokemon_catched:
                     yield from self._soft_reset()
@@ -193,33 +170,33 @@ class CakesSafariMode(BotMode):
                 else:
                     if is_safari_map():
                         yield from self._exit_safari_zone()
-                    context.message = f"You have hit the money threshold (either you've run out of funds or spent over {self._money_spent_limit}₽), but you managed to catch at least one Pokémon during this cycle. Consider saving your game."
+                    context.message = f"You hit the {self._money_spent_limit}₰ threshold, but caught at least one Pokémon. Consider saving."
                     context.set_manual_mode()
                     break
             elif self._should_reenter:
                 yield from self._re_enter_safari_zone()
 
-            stats = context.stats.get_global_stats().to_dict()
-            pokemon_choice = self._get_next_target(stats)
+            mode = ask_for_choice(
+                [
+                    Selection("Use Repel", get_sprites_path() / "items" / "Repel.png"),
+                    Selection("No Repel", get_sprites_path() / "other" / "No Repel.png"),
+                ],
+                window_title="Use Repel?",
+            )
 
-            if pokemon_choice is None:
-                context.message = "All required Pokémon caught. Safari is complete."
+            if mode is None:
                 context.set_manual_mode()
-                break
+                yield
                 return
 
-            context.message = f"Current target: {pokemon_choice}"
+            self._use_repel = mode == "Use Repel"
 
-            target = get_safari_pokemon(pokemon_choice)
-            self._check_mode_requirement(target.value.mode, target.value.hunting_object)
-            yield from self._check_map_requirement(target.value.map_location)
-
+            self._feeder_direction = RSESafariStrategy.get_facing_direction_for_position(target.value.tile_location)
             yield from self._start_safari_hunt(target)
 
     def _start_safari_hunt(self, safari_pokemon: SafariPokemon) -> Generator:
-        current_cash = get_player().money
-        if current_cash < 500:
-            raise BotModeError("You do not have enough cash to enter the Safari Zone.")
+        if get_player().money < 500:
+            raise BotModeError("Not enough cash to enter Safari Zone.")
 
         yield from navigate_to(self._safari_config["map"], self._safari_config["entrance_tile"])
         yield from ensure_facing_direction(self._safari_config["facing_direction"])
@@ -228,7 +205,6 @@ class CakesSafariMode(BotMode):
         for _ in range(10):
             yield
         context.emulator.release_button(self._safari_config["facing_direction"])
-        yield
         yield from wait_for_script_to_start_and_finish(self._safari_config["ask_script"], "A")
         yield from wait_for_script_to_start_and_finish(self._safari_config["enter_script"], "A")
 
@@ -245,99 +221,75 @@ class CakesSafariMode(BotMode):
             safari_pokemon.value.map_location, safari_pokemon.value.tile_location, safari_pokemon.value.mode
         )
 
+    def _navigate_and_hunt(self, target_map, tile_location, mode) -> Generator:
+        def stop():
+            return self._should_reset or self._should_reenter
+
+        if self._safari_config.get("is_at_entrance_door")():
+            yield from wait_for_player_avatar_to_be_standing_still()
+        elif context.rom.is_rse and self._safari_config.get("is_script_active", lambda: False)():
+            while self._safari_config["is_at_entrance_door"]() or self._safari_config["is_script_active"]():
+                yield
+            yield from wait_for_player_avatar_to_be_standing_still()
+
+        for map_group, coords in get_navigation_path(target_map, tile_location):
+            self._current_map, self._current_tile = map_group, coords
+            yield from navigate_to(map_group, coords)
+
+        _, pokeblock = get_lowest_feel_pokeblock_by_type(self._pokeblock_type_in_feeder)
+        yield from ensure_facing_direction(self._feeder_direction)
+        yield from put_pokeblock_in_feeder(pokeblock)
+
+        if self._use_repel and not repel_is_active():
+            yield from apply_repel()
+
+        delay_hours = random.uniform(1, 24)
+        self._easter_egg_timestamp = datetime.now() + timedelta(hours=delay_hours)
+
+        #         Testing
+        self._easter_egg_timestamp = datetime.now() + timedelta(minutes=random.uniform(1, 2))
+        print(self._easter_egg_timestamp)
+
+        yield from unmount_bicycle()
+        yield from apply_white_flute_if_available()
+        yield from spin(
+            stop_condition=stop,
+            easter_egg_flag=lambda: self._do_easter_egg_after_battle,
+            easter_egg_action=lambda: self._easter_egg_rest(self._current_map, self._current_tile),
+            easter_egg_flag_setter=lambda val: setattr(self, "_do_easter_egg_after_battle", val),
+        )
+
     def _re_enter_safari_zone(self) -> Generator:
-        """Handles re-entry into the Safari Zone."""
         if is_safari_map():
             yield from self._exit_safari_zone()
         if self._should_save:
             yield from save_the_game()
         self._should_reenter = False
         self._should_save = False
-        return
 
     def _exit_safari_zone(self) -> Generator:
-        """Handles re-entry into the Safari Zone."""
         yield from StartMenuNavigator("RETIRE").step()
         yield from wait_for_script_to_start_and_finish(self._safari_config["exit_script"], "A")
         yield from wait_for_player_avatar_to_be_standing_still()
 
-    def _navigate_and_hunt(
-        self, target_map: MapFRLG | MapRSE, tile_location: Tuple[int, int], mode: SafariHuntingMode
-    ) -> Generator:
-
-        def stop_condition():
-            return self._should_reset or self._should_reenter
-
-        def is_at_entrance_door():
-            return self._safari_config["is_at_entrance_door"]()
-
-        if is_at_entrance_door():
-            yield from wait_for_player_avatar_to_be_standing_still()
-        elif context.rom.is_rse and self._safari_config.get("is_script_active", lambda: False)():
-            while is_at_entrance_door() or self._safari_config["is_script_active"]():
-                yield
-            yield from wait_for_player_avatar_to_be_standing_still()
-
-        path = get_navigation_path(target_map, tile_location)
-
-        for map_group, coords in path:
-            self._current_map = map_group
-            self._current_tile = coords
-            yield from navigate_to(map_group, coords)
-        if mode in (SafariHuntingMode.SPIN, SafariHuntingMode.SURF):
-            if self._use_repel and not repel_is_active():
-                yield from apply_repel()
-            yield from unmount_bicycle()
-            yield from apply_white_flute_if_available()
-            yield from spin(
-                stop_condition=stop_condition,
-                easter_egg_flag=lambda: self._do_easter_egg_after_battle,
-                easter_egg_action=lambda: self._easter_egg_rest(self._current_map, self._current_tile),
-                easter_egg_flag_setter=lambda val: setattr(self, "_do_easter_egg_after_battle", val),
-            )
+    def _check_mode_requirement(self, mode, obj) -> bool:
+        if mode == SafariHuntingMode.SURF:
+            if not (get_event_flag("BADGE05_GET") and get_party().has_pokemon_with_move("Surf")):
+                raise BotModeError("Missing Badge 05 or Surf move for surfing hunt.")
         elif mode == SafariHuntingMode.FISHING:
-            yield from fish(stop_condition=stop_condition, loop=True)
-        else:
-            raise BotModeError(f"Error: Unknown mode {mode}.")
+            assert_item_exists_in_bag(obj, f"You need the {obj} to fish.", check_in_saved_game=True)
+        return True
 
-    def _check_mode_requirement(self, mode: SafariHuntingMode, object: SafariHuntingObject) -> bool:
-        match mode:
-            case SafariHuntingMode.SURF:
-                if not (get_event_flag("BADGE05_GET") and get_party().has_pokemon_with_move("Surf")):
-                    raise BotModeError(
-                        f"Cannot start mode {mode.value}. You're missing Badge 05 or you don't have any Pokémon with Surf"
-                    )
-            case SafariHuntingMode.FISHING:
-                assert_item_exists_in_bag(
-                    object,
-                    error_message=f"You need to own the {object} in order to hunt this Pokémon in the Safari Zone.",
-                    check_in_saved_game=True,
-                )
-            case _:
-                return True
-
-    def _check_map_requirement(self, map: MapFRLG | MapRSE) -> Generator:
-        match map:
-            case MapRSE.SAFARI_ZONE_NORTHWEST:
-                assert_item_exists_in_bag(
-                    "Mach Bike",
-                    error_message="You need to own the Mach Bike in order to hunt the next target in the Safari Zone.",
-                    check_in_saved_game=True,
-                )
-            case MapRSE.SAFARI_ZONE_NORTH:
-                try:
-                    assert_item_exists_in_bag(
-                        "Acro Bike",
-                        error_message="You need to own the Acro Bike in order to hunt the next target in the Safari Zone.",
-                        check_in_saved_game=True,
-                    )
-                except BotModeError:
-                    yield from self._change_bike()
-            case _:
-                return True
+    def _check_map_requirement(self, map) -> Generator:
+        if map == MapRSE.SAFARI_ZONE_NORTHWEST:
+            assert_item_exists_in_bag("Mach Bike", "Need Mach Bike for Northwest zone.", check_in_saved_game=True)
+        elif map == MapRSE.SAFARI_ZONE_NORTH:
+            try:
+                assert_item_exists_in_bag("Acro Bike", check_in_saved_game=True)
+            except BotModeError:
+                yield from self._change_bike()
 
     def _soft_reset(self) -> Generator:
-        """Handles soft resetting if cash difference exceeds the limit."""
         yield from soft_reset()
         yield from wait_for_unique_rng_value()
         self._should_reset = False
@@ -387,55 +339,31 @@ class CakesSafariMode(BotMode):
         yield from navigate_to(MapRSE.SAFARI_ZONE_REST_HOUSE, (3, 8))
         yield from navigate_to(return_map_group, return_coords)
         yield from unmount_bicycle()
+        yield from ensure_facing_direction(self._feeder_direction)
+        if get_active_pokeblock_feeder_for_location() is None:
+            index, pokeblock = get_lowest_feel_pokeblock_by_type(self._pokeblock_type_in_feeder)
+            yield from put_pokeblock_in_feeder(pokeblock)
         yield from apply_white_flute_if_available()
 
-    def _get_next_target(self, stats: dict) -> str | None:
-        pokemon_stats = stats.get("pokemon", {})
+    def _has_bike(self, name: str) -> bool:
+        return get_item_bag().quantity_of(get_item_by_name(name)) > 0
 
+    def _get_next_target(self, stats: dict) -> str | None:
         def get_catches(name: str) -> int:
-            return pokemon_stats.get(name, {}).get("catches", 0)
+            return stats.get("pokemon", {}).get(name, {}).get("catches", 0)
 
         zones = [
-            (
-                "southwest",
-                {
-                    "core": {"Psyduck": 2, "Pikachu": 2, "Girafarig": 1},
-                    "combo": None,
-                },
-            ),
-            (
-                "northwest",
-                {
-                    "core": {"Rhyhorn": 2, "Pinsir": 1},
-                    "combo": ("Doduo", "Dodrio"),
-                },
-            ),
-            (
-                "northeast",
-                {
-                    "core": {"Phanpy": 2, "Heracross": 1},
-                    "combo": ("Natu", "Xatu"),
-                },
-            ),
+            ("southwest", {"core": {"Psyduck": 2, "Girafarig": 1, "Pikachu": 2}, "combo": None}),
+            ("northwest", {"core": {"Rhyhorn": 2, "Pinsir": 1}, "combo": ("Doduo", "Dodrio")}),
+            ("northeast", {"core": {"Phanpy": 2, "Heracross": 1}, "combo": ("Natu", "Xatu")}),
         ]
 
-        for zone_name, config in zones:
-            core_missing = []
-
-            for name, required in config["core"].items():
-                if get_catches(name) < required:
-                    core_missing.append(name)
-
-            combo = config.get("combo")
-
-            if core_missing:
-                return core_missing[0]
-
-            if combo:
-                a, b = combo
-                a_catches = get_catches(a)
-                b_catches = get_catches(b)
-                combo_ok = (a_catches >= 2) or (a_catches >= 1 and b_catches >= 1)
-                if not combo_ok:
+        for _, config in zones:
+            missing = [name for name, req in config["core"].items() if get_catches(name) < req]
+            if missing:
+                return missing[0]
+            if config["combo"]:
+                a, b = config["combo"]
+                if get_catches(a) < 2 and not (get_catches(a) >= 1 and get_catches(b) >= 1):
                     return a
         return None
